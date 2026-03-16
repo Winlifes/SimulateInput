@@ -1,0 +1,15 @@
+name: macos-smoke
+profile: lab_default
+steps:
+  - action: attach_window
+    title: TextEdit
+
+  - action: locate_uia
+    name: TextEdit
+    exact: false
+
+  - action: press_key
+    key: tab
+
+  - action: screenshot
+    output: artifacts/macos-smoke.png

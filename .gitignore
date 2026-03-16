@@ -1,0 +1,9 @@
+.pytest_cache/
+.venv/
+__pycache__/
+artifacts/
+build/
+dist/
+*.egg-info/
+.simctl/
+.tmpstate*/

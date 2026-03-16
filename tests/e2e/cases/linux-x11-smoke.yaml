@@ -1,0 +1,16 @@
+name: linux-x11-smoke
+profile: lab_default
+steps:
+  - action: attach_window
+    title: gedit
+
+  - action: locate_text
+    text: gedit
+    exact: false
+
+  - action: locate_uia
+    name: File
+    exact: false
+
+  - action: screenshot
+    output: artifacts/linux-x11-smoke.png

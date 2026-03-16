@@ -1,0 +1,4 @@
+interface:
+  display_name: "SimulateInput"
+  short_description: "Operate the SimulateInput automation platform"
+  default_prompt: "Use the SimulateInput automation platform to drive windows, input, and screenshots for testing."

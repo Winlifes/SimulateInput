@@ -1,0 +1,12 @@
+name: linux-wayland-smoke
+profile: lab_default
+steps:
+  - action: attach_window
+    title: gedit
+
+  - action: screenshot
+    output: artifacts/linux-wayland-smoke.png
+
+  - action: locate_ocr
+    text: File
+    exact: false

@@ -1,0 +1,15 @@
+name: windows-smoke
+profile: lab_default
+steps:
+  - action: attach_window
+    title: Notepad
+
+  - action: locate_text
+    text: Notepad
+    exact: false
+
+  - action: press_key
+    key: tab
+
+  - action: screenshot
+    output: artifacts/windows-smoke.png
