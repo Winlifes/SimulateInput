@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from simulateinput.core.models import PlatformKind
 
@@ -12,6 +12,7 @@ class DriverProbe:
     platform: PlatformKind
     message: str = ""
     capabilities: list[str] = field(default_factory=list)
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 class PlatformDriver(Protocol):

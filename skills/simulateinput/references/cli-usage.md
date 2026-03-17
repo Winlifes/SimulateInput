@@ -35,7 +35,15 @@ Inspect built-in profiles, MCP tools, and current driver capability.
 
 ```powershell
 python -m simulateinput.cli.main doctor
+python -m simulateinput.cli.main doctor --compact
+python -m simulateinput.cli.main doctor --verbose
 ```
+
+Output modes:
+
+- default: profiles, MCP tool names, and driver diagnostics
+- `--compact`: reduced payload for UI surfaces that mainly need driver state and remediation
+- `--verbose`: default payload plus package version and full MCP tool metadata
 
 ### session start
 

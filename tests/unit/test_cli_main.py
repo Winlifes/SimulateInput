@@ -23,6 +23,32 @@ class CliMainTest(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertIn("driver", payload)
         self.assertIn("mcp_tools", payload)
+        self.assertIn("details", payload["driver"])
+        self.assertIsInstance(payload["driver"]["details"], dict)
+        remediation = payload["driver"]["details"].get("remediation", [])
+        if remediation:
+            self.assertIn("shell_hint", remediation[0])
+            self.assertIn("copyable_steps", remediation[0])
+            self.assertIsInstance(remediation[0]["copyable_steps"], list)
+
+    def test_doctor_compact_returns_reduced_payload(self) -> None:
+        exit_code, payload = self.run_cli(["doctor", "--compact"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertIn("driver", payload)
+        self.assertNotIn("profiles", payload)
+        self.assertNotIn("mcp_tools", payload)
+        self.assertIn("remediation", payload["driver"])
+
+    def test_doctor_verbose_returns_tool_details(self) -> None:
+        exit_code, payload = self.run_cli(["doctor", "--verbose"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertIn("version", payload)
+        self.assertIn("mcp_tool_details", payload)
+        self.assertTrue(any(tool["name"] == "start_session" for tool in payload["mcp_tool_details"]))
 
     def test_mcp_tools_lists_tool_metadata(self) -> None:
         exit_code, payload = self.run_cli(["mcp", "tools"])

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from simulateinput.core.models import Bounds, ElementInfo, PlatformKind, WindowInfo
 from simulateinput.drivers.base import DriverProbe
+from simulateinput.drivers.diagnostics import permission_remediation
 
 KEY_CODE_MAP = {
     "return": 36,
@@ -85,33 +86,100 @@ class MacOSDriver:
                 platform=self.platform,
                 message=f"macOS driver requires pyobjc Quartz bindings: {exc}",
             )
+        quartz = self._quartz()
+        accessibility_granted = self._probe_accessibility_permission(quartz)
+        automation_granted = self._probe_automation_permission()
+        screen_recording_granted = self._probe_screen_recording_permission(quartz)
+        ocr_dependencies = self._has_ocr_dependencies()
+        image_dependencies = self._has_image_match_dependencies()
+
         capabilities = [
             "probe",
             "list_windows",
             "attach_window",
             "find_text",
-            "find_uia",
-            "click",
-            "drag",
-            "type_text",
-            "press_key",
-            "hotkey",
-            "clear_text",
-            "screenshot",
         ]
-        if self._resolve_tesseract_cmd() is not None:
-            capabilities.append("find_ocr_text")
-        try:
-            import cv2  # noqa: F401
-            from PIL import Image  # noqa: F401
-            capabilities.append("find_image")
-        except ModuleNotFoundError:
-            pass
+        if accessibility_granted is not False:
+            capabilities.extend(["click", "drag"])
+        if automation_granted is not False:
+            capabilities.extend(["type_text", "press_key", "hotkey", "clear_text"])
+        if accessibility_granted is not False and automation_granted is not False:
+            capabilities.append("find_uia")
+        if screen_recording_granted is not False:
+            capabilities.append("screenshot")
+            if ocr_dependencies:
+                capabilities.append("find_ocr_text")
+            if image_dependencies:
+                capabilities.append("find_image")
+
+        missing_permissions: list[str] = []
+        if accessibility_granted is False:
+            missing_permissions.append("Accessibility")
+        if automation_granted is False:
+            missing_permissions.append("Automation")
+        if screen_recording_granted is False:
+            missing_permissions.append("Screen Recording")
+
+        unknown_permissions: list[str] = []
+        if accessibility_granted is None:
+            unknown_permissions.append("Accessibility")
+        if automation_granted is None:
+            unknown_permissions.append("Automation")
+        if screen_recording_granted is None:
+            unknown_permissions.append("Screen Recording")
+
+        notes: list[str] = []
+        if missing_permissions:
+            notes.append(f"missing permissions: {', '.join(missing_permissions)}")
+        if accessibility_granted is False:
+            notes.append("input injection may fail until Accessibility access is granted")
+        if automation_granted is False:
+            notes.append("window raise, UIA lookup, and keyboard actions need Automation access to System Events")
+        if screen_recording_granted is False:
+            notes.append("screenshots, OCR, and image matching need Screen Recording access")
+        if unknown_permissions:
+            notes.append(f"permission preflight unavailable for: {', '.join(unknown_permissions)}")
+
+        message = "macOS driver available with Quartz input, window enumeration, and accessibility lookup"
+        if notes:
+            message += "; " + "; ".join(notes)
+        details = {
+            "permissions": {
+                "accessibility": {
+                    "granted": accessibility_granted,
+                    "required_for": ["click", "drag"],
+                },
+                "automation": {
+                    "granted": automation_granted,
+                    "required_for": ["focus_window", "find_uia", "type_text", "press_key", "hotkey", "clear_text"],
+                },
+                "screen_recording": {
+                    "granted": screen_recording_granted,
+                    "required_for": ["screenshot", "find_ocr_text", "find_image"],
+                },
+            },
+            "dependencies": {
+                "pyobjc_quartz": True,
+                "ocr": ocr_dependencies,
+                "image_match": image_dependencies,
+                "tesseract_cmd": self._resolve_tesseract_cmd(),
+            },
+            "window_matching": {
+                "focus_window": "title-plus-geometry",
+                "find_uia": "title-plus-geometry",
+            },
+            "remediation": self._build_remediation_hints(
+                accessibility_granted=accessibility_granted,
+                automation_granted=automation_granted,
+                screen_recording_granted=screen_recording_granted,
+            ),
+        }
         return DriverProbe(
             available=True,
             platform=self.platform,
-            message="macOS driver available with Quartz input, window enumeration, and accessibility lookup",
-            capabilities=capabilities,
+            message=message,
+            capabilities=list(dict.fromkeys(capabilities)),
+            details=details,
         )
 
     def list_windows(self) -> list[WindowInfo]:
@@ -146,12 +214,15 @@ class MacOSDriver:
         return windows
 
     def focus_window(self, window_id: str) -> bool:
-        for window in self.list_windows():
-            if window.window_id != str(window_id) or not window.process_name:
-                continue
-            self._run_osascript(f'tell application "{self._escape_applescript(window.process_name)}" to activate')
+        try:
+            window = self._get_window(window_id)
+        except ValueError:
+            return False
+        if not window.process_name:
+            return False
+        if self._focus_specific_window(window):
             return True
-        return False
+        return self._activate_application(window.process_name)
 
     def find_text(self, window_id: str, text: str, exact: bool = False) -> list[ElementInfo]:
         query = text.strip()
@@ -195,9 +266,7 @@ class MacOSDriver:
         if not window.process_name:
             return []
         script = self._build_uia_script()
-        env = os.environ.copy()
-        env["SIMULATEINPUT_PROC_NAME"] = window.process_name
-        env["SIMULATEINPUT_WINDOW_TITLE"] = window.title
+        env = self._window_context_env(window)
         env["SIMULATEINPUT_QUERY_NAME"] = name or ""
         env["SIMULATEINPUT_QUERY_ROLE"] = control_type or ""
         env["SIMULATEINPUT_QUERY_AID"] = automation_id or ""
@@ -213,28 +282,7 @@ class MacOSDriver:
         if not payload:
             return []
         parsed = json.loads(payload)
-        matches: list[ElementInfo] = []
-        for item in parsed[:max_results]:
-            matches.append(
-                ElementInfo(
-                    element_id=str(item.get("id") or f"mac-ax-{len(matches)}"),
-                    window_id=window.window_id,
-                    platform=self.platform,
-                    text=str(item.get("text") or ""),
-                    bounds=Bounds(
-                        x=int(item.get("x", 0)),
-                        y=int(item.get("y", 0)),
-                        width=int(item.get("width", 0)),
-                        height=int(item.get("height", 0)),
-                    ),
-                    class_name=item.get("class_name"),
-                    control_type=item.get("control_type"),
-                    automation_id=item.get("automation_id"),
-                    source="ax",
-                    confidence=1.0 if exact else 0.95,
-                )
-            )
-        return matches
+        return self._rank_uia_matches(window, parsed, exact=exact, max_results=max_results)
 
     def find_ocr_text(
         self,
@@ -262,6 +310,7 @@ class MacOSDriver:
             image = Image.open(temp_path)
             data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
             window = self._get_window(window_id)
+            capture_width, capture_height = self._capture_image_size(image)
             lowered = text.casefold()
             matches: list[ElementInfo] = []
             for index, candidate_text in enumerate(data.get("text", [])):
@@ -277,18 +326,22 @@ class MacOSDriver:
                 matched = normalized.casefold() == lowered if exact else lowered in normalized.casefold()
                 if not matched:
                     continue
+                bounds = self._capture_rect_to_bounds(
+                    window,
+                    x=int(data["left"][index]),
+                    y=int(data["top"][index]),
+                    width=int(data["width"][index]),
+                    height=int(data["height"][index]),
+                    capture_width=capture_width,
+                    capture_height=capture_height,
+                )
                 matches.append(
                     ElementInfo(
                         element_id=f"ocr-{window_id}-{index}",
                         window_id=str(window_id),
                         platform=self.platform,
                         text=normalized,
-                        bounds=Bounds(
-                            x=window.bounds.x + int(data["left"][index]),
-                            y=window.bounds.y + int(data["top"][index]),
-                            width=int(data["width"][index]),
-                            height=int(data["height"][index]),
-                        ),
+                        bounds=bounds,
                         control_type="ocr-text",
                         source="ocr",
                         confidence=max(confidence / 100.0, 0.0),
@@ -318,7 +371,9 @@ class MacOSDriver:
             temp_path = Path(temp_file.name)
         try:
             self.screenshot_window(window_id, str(temp_path))
-            screen = cv2.cvtColor(np.array(Image.open(temp_path).convert("RGB")), cv2.COLOR_RGB2BGR)
+            capture_image = Image.open(temp_path).convert("RGB")
+            capture_width, capture_height = self._capture_image_size(capture_image)
+            screen = cv2.cvtColor(np.array(capture_image), cv2.COLOR_RGB2BGR)
             template = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
             if template is None:
                 raise ValueError(f"failed to read image template: {image_path}")
@@ -348,13 +403,22 @@ class MacOSDriver:
                 if any(self._iou(box, other) >= 0.35 for other in accepted):
                     continue
                 accepted.append(box)
+                bounds = self._capture_rect_to_bounds(
+                    window,
+                    x=x,
+                    y=y,
+                    width=width,
+                    height=height,
+                    capture_width=capture_width,
+                    capture_height=capture_height,
+                )
                 matches.append(
                     ElementInfo(
                         element_id=f"img-{window_id}-{len(matches)}",
                         window_id=str(window_id),
                         platform=self.platform,
                         text=template_path.name,
-                        bounds=Bounds(x=window.bounds.x + x, y=window.bounds.y + y, width=width, height=height),
+                        bounds=bounds,
                         control_type="image-template",
                         source="image",
                         confidence=score,
@@ -411,7 +475,7 @@ class MacOSDriver:
     def screenshot_window(self, window_id: str, output_path: str) -> str:
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["screencapture", "-x", "-l", str(window_id), str(output)], check=True, capture_output=True, text=True)
+        subprocess.run(["screencapture", "-x", "-o", "-l", str(window_id), str(output)], check=True, capture_output=True, text=True)
         return str(output)
 
     def _send_keystroke(self, key: str, modifiers: list[str] | None = None) -> None:
@@ -474,6 +538,280 @@ class MacOSDriver:
                 return str(candidate)
         return None
 
+    def _has_ocr_dependencies(self) -> bool:
+        try:
+            import pytesseract  # noqa: F401
+            from PIL import Image  # noqa: F401
+        except ModuleNotFoundError:
+            return False
+        return self._resolve_tesseract_cmd() is not None
+
+    def _has_image_match_dependencies(self) -> bool:
+        try:
+            import cv2  # noqa: F401
+            from PIL import Image  # noqa: F401
+            import numpy  # noqa: F401
+        except ModuleNotFoundError:
+            return False
+        return True
+
+    def _probe_accessibility_permission(self, quartz: object | None = None) -> bool | None:
+        runtime = quartz or self._quartz()
+        checker = getattr(runtime, "AXIsProcessTrusted", None)
+        if checker is None:
+            return None
+        try:
+            return bool(checker())
+        except Exception:
+            return None
+
+    def _probe_screen_recording_permission(self, quartz: object | None = None) -> bool | None:
+        runtime = quartz or self._quartz()
+        checker = getattr(runtime, "CGPreflightScreenCaptureAccess", None)
+        if checker is None:
+            return None
+        try:
+            return bool(checker())
+        except Exception:
+            return None
+
+    def _probe_automation_permission(self) -> bool | None:
+        try:
+            self._run_osascript('tell application "System Events" to get name of first process')
+            return True
+        except subprocess.CalledProcessError as exc:
+            details = " ".join(
+                part for part in (exc.stdout, exc.stderr, str(exc)) if part
+            ).casefold()
+            markers = [
+                "not authorized",
+                "not permitted",
+                "not allowed",
+                "automation",
+                "assistive access",
+                "-1743",
+                "-25211",
+            ]
+            if any(marker in details for marker in markers):
+                return False
+            return None
+        except Exception:
+            return None
+
+    def _build_remediation_hints(
+        self,
+        accessibility_granted: bool | None,
+        automation_granted: bool | None,
+        screen_recording_granted: bool | None,
+    ) -> list[dict[str, object]]:
+        hints: list[dict[str, object]] = []
+        if accessibility_granted is False:
+            hints.append(
+                permission_remediation(
+                    "Accessibility",
+                    "Needed for reliable mouse input and some foreground window interactions.",
+                    ["Privacy & Security", "Accessibility"],
+                    shell_hint="open 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'",
+                    copyable_steps=[
+                        "Open System Settings.",
+                        "Go to Privacy & Security > Accessibility.",
+                        "Enable access for the app or terminal running SimulateInput.",
+                    ],
+                )
+            )
+        if automation_granted is False:
+            hints.append(
+                permission_remediation(
+                    "Automation",
+                    "Needed to control System Events for window raise, UIA lookup, and keyboard actions.",
+                    ["Privacy & Security", "Automation"],
+                    shell_hint="open 'x-apple.systempreferences:com.apple.preference.security?Privacy_Automation'",
+                    copyable_steps=[
+                        "Open System Settings.",
+                        "Go to Privacy & Security > Automation.",
+                        "Allow the app or terminal running SimulateInput to control System Events.",
+                    ],
+                )
+            )
+        if screen_recording_granted is False:
+            hints.append(
+                permission_remediation(
+                    "Screen Recording",
+                    "Needed for screenshots, OCR, and image matching.",
+                    ["Privacy & Security", "Screen Recording"],
+                    shell_hint="open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'",
+                    copyable_steps=[
+                        "Open System Settings.",
+                        "Go to Privacy & Security > Screen Recording.",
+                        "Enable access for the app or terminal running SimulateInput.",
+                        "Quit and reopen the app if macOS asks for a restart.",
+                    ],
+                )
+            )
+        return hints
+
+    def _rank_uia_matches(
+        self,
+        window: WindowInfo,
+        parsed: list[dict[str, object]],
+        exact: bool,
+        max_results: int,
+    ) -> list[ElementInfo]:
+        ranked: list[tuple[tuple[float, int, int, int], ElementInfo]] = []
+        for index, item in enumerate(parsed):
+            element = ElementInfo(
+                element_id=str(item.get("id") or f"mac-ax-{index}"),
+                window_id=window.window_id,
+                platform=self.platform,
+                text=str(item.get("text") or ""),
+                bounds=Bounds(
+                    x=int(item.get("x", 0)),
+                    y=int(item.get("y", 0)),
+                    width=int(item.get("width", 0)),
+                    height=int(item.get("height", 0)),
+                ),
+                class_name=item.get("class_name"),
+                control_type=item.get("control_type"),
+                automation_id=item.get("automation_id"),
+                source="ax",
+                confidence=self._uia_confidence(item, exact=exact),
+                metadata={
+                    "visible": self._coerce_bool(item.get("visible")),
+                    "enabled": self._coerce_bool(item.get("enabled")),
+                    "actions": sorted(self._normalize_action_names(item.get("actions"))),
+                },
+            )
+            ranked.append((self._uia_sort_key(item, element), element))
+
+        ranked.sort(key=lambda item: item[0])
+        deduped: list[ElementInfo] = []
+        seen: set[tuple[str, str, str, int, int, int, int]] = set()
+        for _, element in ranked:
+            key = (
+                element.text,
+                element.control_type or "",
+                element.automation_id or "",
+                int(element.bounds.x),
+                int(element.bounds.y),
+                int(element.bounds.width),
+                int(element.bounds.height),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(element)
+            if len(deduped) >= max_results:
+                break
+        return deduped
+
+    def _uia_confidence(self, item: dict[str, object], exact: bool) -> float:
+        score = self._uia_match_score(item)
+        base = 0.72 if exact else 0.58
+        cap = 0.99 if exact else 0.95
+        return min(cap, base + (score / 220.0))
+
+    def _uia_sort_key(self, item: dict[str, object], element: ElementInfo) -> tuple[float, int, int, int]:
+        score = self._uia_match_score(item)
+        return (
+            -score,
+            int(element.bounds.y),
+            int(element.bounds.x),
+            len(element.text or ""),
+        )
+
+    def _uia_match_score(self, item: dict[str, object]) -> float:
+        score = 0.0
+        if self._coerce_bool(item.get("visible")) is True:
+            score += 40.0
+        if self._coerce_bool(item.get("enabled")) is True:
+            score += 25.0
+        action_names = self._normalize_action_names(item.get("actions"))
+        if "axpress" in action_names:
+            score += 25.0
+        elif action_names:
+            score += 10.0
+
+        control_type = str(item.get("control_type") or "").casefold()
+        preferred_roles = {
+            "axbutton": 18.0,
+            "axcheckbox": 16.0,
+            "axradiobutton": 16.0,
+            "axpopbutton": 15.0,
+            "axmenuitem": 14.0,
+            "axtextfield": 12.0,
+            "axsecuretextfield": 12.0,
+        }
+        score += preferred_roles.get(control_type, 0.0)
+
+        width = max(int(item.get("width", 0) or 0), 0)
+        height = max(int(item.get("height", 0) or 0), 0)
+        if width > 0 and height > 0:
+            score += 5.0
+        if width >= 8 and height >= 8:
+            score += 4.0
+        return score
+
+    def _coerce_bool(self, value: object) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().casefold()
+            if normalized in {"true", "yes", "1"}:
+                return True
+            if normalized in {"false", "no", "0"}:
+                return False
+        return None
+
+    def _normalize_action_names(self, actions: object) -> set[str]:
+        if not isinstance(actions, list):
+            return set()
+        return {str(action).strip().casefold() for action in actions if str(action).strip()}
+
+    def _capture_image_size(self, image: object) -> tuple[int, int]:
+        size = getattr(image, "size", None)
+        if (
+            isinstance(size, tuple)
+            and len(size) == 2
+            and all(isinstance(value, (int, float)) and value > 0 for value in size)
+        ):
+            return int(size[0]), int(size[1])
+        width = getattr(image, "width", None)
+        height = getattr(image, "height", None)
+        if isinstance(width, (int, float)) and width > 0 and isinstance(height, (int, float)) and height > 0:
+            return int(width), int(height)
+        raise ValueError("capture image is missing a usable size")
+
+    def _capture_rect_to_bounds(
+        self,
+        window: WindowInfo,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        capture_width: int,
+        capture_height: int,
+    ) -> Bounds:
+        scale_x, scale_y = self._capture_scale(window, capture_width, capture_height)
+        return Bounds(
+            x=window.bounds.x + int(round(x / scale_x)),
+            y=window.bounds.y + int(round(y / scale_y)),
+            width=max(1, int(round(width / scale_x))),
+            height=max(1, int(round(height / scale_y))),
+        )
+
+    def _capture_scale(self, window: WindowInfo, capture_width: int, capture_height: int) -> tuple[float, float]:
+        window_width = max(int(window.bounds.width), 1)
+        window_height = max(int(window.bounds.height), 1)
+        scale_x = float(capture_width) / float(window_width) if capture_width > 0 else 1.0
+        scale_y = float(capture_height) / float(window_height) if capture_height > 0 else 1.0
+        if scale_x <= 0:
+            scale_x = 1.0
+        if scale_y <= 0:
+            scale_y = 1.0
+        return scale_x, scale_y
+
     def _dedupe_elements(self, matches: list[ElementInfo]) -> list[ElementInfo]:
         seen: set[tuple[str, str, int, int, int, int]] = set()
         deduped: list[ElementInfo] = []
@@ -507,6 +845,38 @@ class MacOSDriver:
         union = (left_w * left_h) + (right_w * right_h) - intersection
         return intersection / union if union else 0.0
 
+    def _activate_application(self, process_name: str) -> bool:
+        try:
+            self._run_osascript(f'tell application "{self._escape_applescript(process_name)}" to activate')
+        except Exception:
+            return False
+        return True
+
+    def _focus_specific_window(self, window: WindowInfo) -> bool:
+        script = self._build_focus_window_script()
+        env = self._window_context_env(window)
+        try:
+            result = subprocess.run(
+                ["osascript", "-l", "AppleScript", "-e", script],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        except Exception:
+            return False
+        return result.stdout.strip().lower() == "true"
+
+    def _window_context_env(self, window: WindowInfo) -> dict[str, str]:
+        env = os.environ.copy()
+        env["SIMULATEINPUT_PROC_NAME"] = window.process_name or ""
+        env["SIMULATEINPUT_WINDOW_TITLE"] = window.title
+        env["SIMULATEINPUT_WINDOW_X"] = str(int(window.bounds.x))
+        env["SIMULATEINPUT_WINDOW_Y"] = str(int(window.bounds.y))
+        env["SIMULATEINPUT_WINDOW_WIDTH"] = str(int(window.bounds.width))
+        env["SIMULATEINPUT_WINDOW_HEIGHT"] = str(int(window.bounds.height))
+        return env
+
     def _build_uia_script(self) -> str:
         return r'''
 on replace_text(theText, oldString, newString)
@@ -526,8 +896,40 @@ on json_escape(theText)
     return theText
 end json_escape
 
+on abs_int(valueNumber)
+    if valueNumber < 0 then
+        return -valueNumber
+    end if
+    return valueNumber
+end abs_int
+
+on format_actions_json(actionList)
+    if actionList is "" then
+        return ""
+    end if
+    set previousDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to "|"
+    set actionItems to every text item of actionList
+    set AppleScript's text item delimiters to previousDelimiters
+    set output to ""
+    set firstItem to true
+    repeat with actionName in actionItems
+        set normalizedAction to my json_escape((actionName as text))
+        if normalizedAction is not "" then
+            if not firstItem then set output to output & ","
+            set firstItem to false
+            set output to output & "\"" & normalizedAction & "\""
+        end if
+    end repeat
+    return output
+end format_actions_json
+
 set procName to system attribute "SIMULATEINPUT_PROC_NAME"
 set winTitle to system attribute "SIMULATEINPUT_WINDOW_TITLE"
+set targetX to (system attribute "SIMULATEINPUT_WINDOW_X") as integer
+set targetY to (system attribute "SIMULATEINPUT_WINDOW_Y") as integer
+set targetW to (system attribute "SIMULATEINPUT_WINDOW_WIDTH") as integer
+set targetH to (system attribute "SIMULATEINPUT_WINDOW_HEIGHT") as integer
 set queryName to system attribute "SIMULATEINPUT_QUERY_NAME"
 set queryRole to system attribute "SIMULATEINPUT_QUERY_ROLE"
 set queryAid to system attribute "SIMULATEINPUT_QUERY_AID"
@@ -536,7 +938,44 @@ set exactMatch to exactFlag is "1"
 
 tell application "System Events"
     tell process procName
-        set targetWindow to first window whose name is winTitle
+        set targetWindow to missing value
+        set bestScore to 2147483647
+        repeat with w in windows
+            set windowName to ""
+            try
+                set windowName to (name of w) as text
+            end try
+
+            set titlePenalty to 20000
+            if windowName is winTitle then
+                set titlePenalty to 0
+            else if windowName contains winTitle or winTitle contains windowName then
+                set titlePenalty to 5000
+            end if
+
+            set posX to 0
+            set posY to 0
+            set sizeW to 0
+            set sizeH to 0
+            try
+                set windowPosition to position of w
+                set posX to item 1 of windowPosition
+                set posY to item 2 of windowPosition
+            end try
+            try
+                set windowSize to size of w
+                set sizeW to item 1 of windowSize
+                set sizeH to item 2 of windowSize
+            end try
+            set score to titlePenalty + (my abs_int(posX - targetX)) + (my abs_int(posY - targetY)) + (my abs_int(sizeW - targetW)) + (my abs_int(sizeH - targetH))
+            if targetWindow is missing value or score < bestScore then
+                set targetWindow to w
+                set bestScore to score
+            end if
+        end repeat
+        if targetWindow is missing value then
+            return "[]"
+        end if
         set output to "["
         set firstItem to true
         repeat with e in entire contents of targetWindow
@@ -553,9 +992,19 @@ tell application "System Events"
             try
                 set roleName to (role of e) as text
             end try
+            set subroleName to ""
+            try
+                set subroleName to (subrole of e) as text
+            end try
             try
                 set elementAid to (value of attribute "AXIdentifier" of e) as text
             end try
+            set className to ""
+            if subroleName is not "" then
+                set className to subroleName
+            else
+                set className to roleName
+            end if
             try
                 set elementPosition to position of e
                 set posX to item 1 of elementPosition
@@ -565,6 +1014,21 @@ tell application "System Events"
                 set elementSize to size of e
                 set sizeW to item 1 of elementSize
                 set sizeH to item 2 of elementSize
+            end try
+            set isVisible to false
+            try
+                set isVisible to visible of e
+            end try
+            set isEnabled to true
+            try
+                set isEnabled to enabled of e
+            end try
+            set actionList to ""
+            try
+                set elementActions to actions of e
+                set AppleScript's text item delimiters to "|"
+                set actionList to elementActions as string
+                set AppleScript's text item delimiters to ""
             end try
 
             set includeItem to true
@@ -593,10 +1057,77 @@ tell application "System Events"
             if includeItem then
                 if not firstItem then set output to output & ","
                 set firstItem to false
-                set output to output & "{\"id\":\"" & my json_escape(roleName & ":" & elementName & ":" & elementAid) & "\",\"text\":\"" & my json_escape(elementName) & "\",\"control_type\":\"" & my json_escape(roleName) & "\",\"automation_id\":\"" & my json_escape(elementAid) & "\",\"x\":" & posX & ",\"y\":" & posY & ",\"width\":" & sizeW & ",\"height\":" & sizeH & "}"
+                set output to output & "{\"id\":\"" & my json_escape(roleName & ":" & elementName & ":" & elementAid & ":" & posX & ":" & posY) & "\",\"text\":\"" & my json_escape(elementName) & "\",\"control_type\":\"" & my json_escape(roleName) & "\",\"class_name\":\"" & my json_escape(className) & "\",\"automation_id\":\"" & my json_escape(elementAid) & "\",\"x\":" & posX & ",\"y\":" & posY & ",\"width\":" & sizeW & ",\"height\":" & sizeH & ",\"visible\":" & isVisible & ",\"enabled\":" & isEnabled & ",\"actions\":[" & my format_actions_json(actionList) & "]}"
             end if
         end repeat
         return output & "]"
+    end tell
+end tell
+'''
+
+    def _build_focus_window_script(self) -> str:
+        return r'''
+on abs_int(valueNumber)
+    if valueNumber < 0 then
+        return -valueNumber
+    end if
+    return valueNumber
+end abs_int
+
+set procName to system attribute "SIMULATEINPUT_PROC_NAME"
+set winTitle to system attribute "SIMULATEINPUT_WINDOW_TITLE"
+set targetX to (system attribute "SIMULATEINPUT_WINDOW_X") as integer
+set targetY to (system attribute "SIMULATEINPUT_WINDOW_Y") as integer
+set targetW to (system attribute "SIMULATEINPUT_WINDOW_WIDTH") as integer
+set targetH to (system attribute "SIMULATEINPUT_WINDOW_HEIGHT") as integer
+
+tell application "System Events"
+    tell process procName
+        set frontmost to true
+        set bestWindow to missing value
+        set bestScore to 2147483647
+        repeat with w in windows
+            set windowName to ""
+            try
+                set windowName to (name of w) as text
+            end try
+            set titlePenalty to 20000
+            if windowName is winTitle then
+                set titlePenalty to 0
+            else if windowName contains winTitle or winTitle contains windowName then
+                set titlePenalty to 5000
+            end if
+
+            set posX to 0
+            set posY to 0
+            set sizeW to 0
+            set sizeH to 0
+            try
+                set windowPosition to position of w
+                set posX to item 1 of windowPosition
+                set posY to item 2 of windowPosition
+            end try
+            try
+                set windowSize to size of w
+                set sizeW to item 1 of windowSize
+                set sizeH to item 2 of windowSize
+            end try
+            set score to titlePenalty + (my abs_int(posX - targetX)) + (my abs_int(posY - targetY)) + (my abs_int(sizeW - targetW)) + (my abs_int(sizeH - targetH))
+            if bestWindow is missing value or score < bestScore then
+                set bestWindow to w
+                set bestScore to score
+            end if
+        end repeat
+        if bestWindow is missing value then
+            return "false"
+        end if
+        try
+            perform action "AXRaise" of bestWindow
+        end try
+        try
+            set value of attribute "AXMain" of bestWindow to true
+        end try
+        return "true"
     end tell
 end tell
 '''

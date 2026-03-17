@@ -12,6 +12,7 @@ from simulateinput.core.session import SessionStore
 from simulateinput.mcp.server import MCPServer, list_tools
 from simulateinput.runner.case_runner import load_case, run_case
 
+
 def emit(payload: dict) -> None:
     print(json.dumps(payload, indent=2))
 
@@ -21,7 +22,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("version", help="Print the current package version.")
-    subparsers.add_parser("doctor", help="Show built-in profiles and MCP tool names.")
+    doctor_parser = subparsers.add_parser("doctor", help="Show built-in profiles, driver diagnostics, and MCP tool names.")
+    doctor_mode = doctor_parser.add_mutually_exclusive_group()
+    doctor_mode.add_argument("--compact", action="store_true", help="Emit a reduced payload focused on driver status and remediation.")
+    doctor_mode.add_argument("--verbose", action="store_true", help="Emit expanded driver details plus full MCP tool metadata.")
 
     session_parser = subparsers.add_parser("session", help="Manage automation sessions.")
     session_subparsers = session_parser.add_subparsers(dest="session_command", required=True)
@@ -208,6 +212,32 @@ def resolve_engine(state_root: Path | None) -> AutomationEngine:
     return AutomationEngine(state_root=state_root)
 
 
+def build_doctor_payload(engine: AutomationEngine, compact: bool = False, verbose: bool = False) -> dict:
+    driver = engine.probe_driver()
+    tool_defs = list_tools()
+    if compact:
+        return {
+            "ok": True,
+            "driver": {
+                "available": driver["available"],
+                "platform": driver["platform"],
+                "message": driver["message"],
+                "capabilities": driver["capabilities"],
+                "remediation": driver.get("details", {}).get("remediation", []),
+            },
+        }
+    payload = {
+        "ok": True,
+        "profiles": sorted(BUILTIN_PROFILES),
+        "mcp_tools": [tool.name for tool in tool_defs],
+        "driver": driver,
+    }
+    if verbose:
+        payload["version"] = __version__
+        payload["mcp_tool_details"] = [tool.to_dict() for tool in tool_defs]
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     try:
@@ -219,14 +249,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "doctor":
             engine = resolve_engine(None)
-            emit(
-                {
-                    "ok": True,
-                    "profiles": sorted(BUILTIN_PROFILES),
-                    "mcp_tools": [tool.name for tool in list_tools()],
-                    "driver": engine.probe_driver(),
-                }
-            )
+            emit(build_doctor_payload(engine, compact=getattr(args, "compact", False), verbose=getattr(args, "verbose", False)))
             return 0
 
         if args.command == "mcp":

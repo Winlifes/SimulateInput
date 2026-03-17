@@ -98,6 +98,7 @@ class ElementInfo:
     automation_id: str | None = None
     source: str | None = None
     confidence: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -111,6 +112,7 @@ class ElementInfo:
             "automation_id": self.automation_id,
             "source": self.source,
             "confidence": float(self.confidence) if self.confidence is not None else None,
+            "metadata": self.metadata,
         }
 
     @classmethod
@@ -126,6 +128,7 @@ class ElementInfo:
             automation_id=payload.get("automation_id"),
             source=payload.get("source"),
             confidence=payload.get("confidence"),
+            metadata=payload.get("metadata", {}),
         )
 
 

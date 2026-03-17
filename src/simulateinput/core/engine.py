@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from simulateinput.core.errors import DriverNotAvailableError
-from simulateinput.core.models import ActionResult, Artifact, ArtifactKind, ElementInfo, WindowInfo
+from simulateinput.core.models import ActionResult, Artifact, ArtifactKind, ElementInfo, PlatformKind, WindowInfo
 from simulateinput.core.session import SessionStore
 from simulateinput.drivers.registry import create_driver
 
@@ -23,6 +23,7 @@ class AutomationEngine:
             "platform": probe.platform.value,
             "message": probe.message,
             "capabilities": probe.capabilities,
+            "details": getattr(probe, "details", {}),
         }
 
     def list_windows(self, session_id: str) -> list[WindowInfo]:
@@ -252,11 +253,55 @@ class AutomationEngine:
         if not matches:
             raise ValueError("uia target not found")
         target = matches[0]
+        self._validate_clickable_uia_target(target)
         window = self._resolve_window(session_id, window_id=target.window_id)
         self._focus_window(window)
         payload = self._build_center_payload(target)
         self.driver.click(payload["absolute"]["x"], payload["absolute"]["y"])
         return ActionResult(ok=True, code="OK", message="click_uia executed", data=payload)
+
+    def _validate_clickable_uia_target(self, target: ElementInfo) -> None:
+        if target.platform != PlatformKind.MACOS:
+            return
+        metadata = target.metadata or {}
+        if not metadata:
+            return
+
+        if metadata.get("visible") is False:
+            raise ValueError("macOS UIA target is not visible")
+        if metadata.get("enabled") is False:
+            raise ValueError("macOS UIA target is disabled")
+        if int(target.bounds.width) <= 0 or int(target.bounds.height) <= 0:
+            raise ValueError("macOS UIA target has no clickable size")
+
+        actions = {
+            str(action).strip().casefold()
+            for action in metadata.get("actions", [])
+            if str(action).strip()
+        }
+        actionable_actions = {
+            "axpress",
+            "axconfirm",
+            "axshowmenu",
+            "axpick",
+            "axopen",
+            "axincrement",
+            "axdecrement",
+        }
+        interactive_roles = {
+            "axbutton",
+            "axcheckbox",
+            "axradiobutton",
+            "axpopbutton",
+            "axmenuitem",
+            "axtextfield",
+            "axsecuretextfield",
+            "axlink",
+            "axdisclosuretriangle",
+        }
+        control_type = (target.control_type or "").casefold()
+        if actions and not (actions & actionable_actions) and control_type not in interactive_roles:
+            raise ValueError("macOS UIA target is not actionable for click_uia")
 
     def preview_click_ocr(
         self,

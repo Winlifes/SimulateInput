@@ -263,6 +263,50 @@ class EngineActionsTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(self.driver.click_calls[-1], (350, 336))
 
+    def test_execute_click_uia_rejects_non_visible_macos_target(self) -> None:
+        self.driver.platform = PlatformKind.MACOS
+        self.driver.window.platform = PlatformKind.MACOS
+        self.driver.uia_matches = [
+            ElementInfo(
+                element_id="uia-hidden",
+                window_id="win-1",
+                platform=PlatformKind.MACOS,
+                text="Submit",
+                bounds=Bounds(x=300, y=320, width=100, height=32),
+                class_name="AXButton",
+                control_type="AXButton",
+                automation_id="submitButton",
+                source="ax",
+                confidence=0.9,
+                metadata={"visible": False, "enabled": True, "actions": ["axpress"]},
+            )
+        ]
+
+        with self.assertRaisesRegex(ValueError, "not visible"):
+            self.engine.execute_click_uia(self.session_id, automation_id="submitButton", exact=True)
+
+    def test_execute_click_uia_rejects_non_actionable_macos_target(self) -> None:
+        self.driver.platform = PlatformKind.MACOS
+        self.driver.window.platform = PlatformKind.MACOS
+        self.driver.uia_matches = [
+            ElementInfo(
+                element_id="uia-static",
+                window_id="win-1",
+                platform=PlatformKind.MACOS,
+                text="Submit",
+                bounds=Bounds(x=300, y=320, width=100, height=32),
+                class_name="AXStaticText",
+                control_type="AXStaticText",
+                automation_id="submitLabel",
+                source="ax",
+                confidence=0.9,
+                metadata={"visible": True, "enabled": True, "actions": ["axshowdefaultui"]},
+            )
+        ]
+
+        with self.assertRaisesRegex(ValueError, "not actionable"):
+            self.engine.execute_click_uia(self.session_id, automation_id="submitLabel", exact=True)
+
     def test_find_ocr_text_returns_matches(self) -> None:
         matches = self.engine.find_ocr_text(self.session_id, text="confirm", confidence_threshold=0.8)
 
