@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "simulateinput"
-version = "0.1.0"
+version = "0.1.1"
 description = "Cross-platform desktop and browser automation test platform."
 readme = "docs/automation-platform-design.md"
 requires-python = ">=3.11"

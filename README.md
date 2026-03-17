@@ -26,11 +26,12 @@ It combines direct input execution, multiple locator strategies, CLI and MCP int
 - MCP server for AI tool calling
 - YAML case runner for repeatable automation flows
 - Skill definitions and references for AI-assisted execution
+- Structured `doctor` diagnostics with remediation hints for local setup issues
 
 ## Current Platform Status
 
 - Windows: primary implementation, real execution and smoke tested
-- macOS: MVP driver implemented, requires Accessibility / Automation / Screen Recording permissions
+- macOS: MVP driver implemented, with structured permission diagnostics, title-plus-geometry window matching, and safer `click_uia` pre-checks
 - Linux X11: MVP driver implemented, depends on `wmctrl`, `xdotool`, screenshot helpers, and optional AT-SPI tooling
 - Linux Wayland: compatibility layer, helper-tool dependent and not yet full parity
 
@@ -57,9 +58,17 @@ It combines direct input execution, multiple locator strategies, CLI and MCP int
 ```powershell
 $env:PYTHONPATH='src'
 python -m simulateinput.cli.main doctor
+python -m simulateinput.cli.main doctor --compact
+python -m simulateinput.cli.main doctor --verbose
 python -m simulateinput.cli.main session start
 python -m simulateinput.cli.main mcp tools
 ```
+
+`doctor` output modes:
+
+- default: built-in profiles, MCP tool names, and driver diagnostics
+- `--compact`: reduced payload for UI surfaces that mainly need driver state and remediation
+- `--verbose`: default payload plus full MCP tool metadata
 
 ## Typical CLI Workflow
 
@@ -74,6 +83,8 @@ python -m simulateinput.cli.main locate uia --session-id <session_id> --name "Su
 python -m simulateinput.cli.main action click-uia --session-id <session_id> --name "Submit"
 python -m simulateinput.cli.main action screenshot --session-id <session_id> --output artifacts/shot.png
 ```
+
+On macOS, `click-uia` now validates that the chosen control is visible, enabled, and reasonably actionable before clicking its center.
 
 ## YAML Case Runner
 
@@ -135,6 +146,13 @@ See `docs/cross-platform-installation.md` for:
 - CLI reference: `skills/simulateinput/references/cli-usage.md`
 - MCP reference: `skills/simulateinput/references/mcp-tools.md`
 
+## macOS Notes
+
+- `doctor` reports structured permission status for `Accessibility`, `Automation`, and `Screen Recording`
+- remediation hints now include `system_settings_path`, `shell_hint`, and `copyable_steps`
+- `find_uia` and `focus_window` use title-plus-geometry matching to reduce wrong-window selection when titles repeat
+- screenshots, OCR, and image matching still require `Screen Recording`
+
 ## Safety Boundary
 
 SimulateInput is intended for automation of your own software, test environments, and explicitly authorized systems.
@@ -169,11 +187,12 @@ SimulateInput 是一个跨平台的桌面与浏览器自动化测试平台，用
 - MCP 服务，可供 AI 通过工具调用
 - YAML case runner，可执行可复用的自动化测试流程
 - 为 AI 使用准备的 skill 文档和参考资料
+- 结构化 `doctor` 诊断输出，可直接给本地环境修复提示
 
 ## 当前平台状态
 
 - Windows：主实现，已完成真实执行和 smoke test
-- macOS：已完成 MVP 驱动，实现依赖 Accessibility / Automation / Screen Recording 权限
+- macOS：已完成 MVP 驱动，支持结构化权限诊断、基于标题加几何信息的窗口匹配，以及更安全的 `click_uia` 预检查
 - Linux X11：已完成 MVP 驱动，依赖 `wmctrl`、`xdotool`、截图工具和可选 AT-SPI 环境
 - Linux Wayland：当前是兼容层，依赖外部 helper，能力还未与 Windows 等价
 
@@ -200,9 +219,17 @@ SimulateInput 是一个跨平台的桌面与浏览器自动化测试平台，用
 ```powershell
 $env:PYTHONPATH='src'
 python -m simulateinput.cli.main doctor
+python -m simulateinput.cli.main doctor --compact
+python -m simulateinput.cli.main doctor --verbose
 python -m simulateinput.cli.main session start
 python -m simulateinput.cli.main mcp tools
 ```
+
+`doctor` 输出模式：
+
+- 默认：内置 profile、MCP 工具名和当前 driver 诊断
+- `--compact`：更适合 UI 消费的精简结果，重点保留 driver 状态和 remediation
+- `--verbose`：在默认结果上附加完整 MCP 工具元数据
 
 ## 常见 CLI 流程
 
@@ -217,6 +244,8 @@ python -m simulateinput.cli.main locate uia --session-id <session_id> --name "Su
 python -m simulateinput.cli.main action click-uia --session-id <session_id> --name "Submit"
 python -m simulateinput.cli.main action screenshot --session-id <session_id> --output artifacts/shot.png
 ```
+
+在 macOS 上，`click-uia` 现在会在点击中心点之前先检查目标控件是否可见、可用，并且是否具备合理的可操作性。
 
 ## YAML 用例执行
 
@@ -277,6 +306,13 @@ python -m simulateinput.cli.main mcp serve
 - Skill：`skills/simulateinput/SKILL.md`
 - CLI 参考：`skills/simulateinput/references/cli-usage.md`
 - MCP 参考：`skills/simulateinput/references/mcp-tools.md`
+
+## macOS 说明
+
+- `doctor` 会输出 `Accessibility`、`Automation`、`Screen Recording` 的结构化权限状态
+- remediation 结果包含 `system_settings_path`、`shell_hint` 和 `copyable_steps`
+- `find_uia` 和 `focus_window` 会用“标题 + 几何信息”匹配窗口，降低重名窗口误选概率
+- 截图、OCR 和图像匹配仍然依赖 `Screen Recording` 权限
 
 ## 安全边界
 
